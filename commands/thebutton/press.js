@@ -1,76 +1,86 @@
-const { format }  = require('date-fns');
 const { SlashCommandBuilder } = require('discord.js');
-const { getDbInstance, loadGuildDb, saveGuildDb } = require('../../lib/thebutton/db');
-const { calculateLevel, getPressedMsg } = require('../../lib/thebutton/button');
+const { getOrCreateGuild, getOrCreateGuildMember, getTopUsers, pressButton } = require('../../lib/thebutton/db');
+const { updateStatus } = require('../../lib/thebutton/button');
+const { calculateLevel } = require('../../lib/thebutton/level');
 const { logger } = require('../../lib/thebutton/logger');
 
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('thebutton')
-        .setDescription(`Press it!`)
+        .setDescription(`Press the button!`)
         .setDMPermission(false),
 
-    async execute(interaction) {          
-        const db = getDbInstance();
-        const guildDb = await loadGuildDb(interaction.guild.id, db);    
+    async execute(interaction) {    
+        const guild = await getOrCreateGuild(interaction.guild);
+        const user = await getOrCreateGuildMember(interaction.guild, interaction.member);
+        const topUserBefore = (await getTopUsers(interaction.guildId, 1))[0];
+
         const now = Date.now();
-        const newLevel = calculateLevel(guildDb.lastClick, now);
+        const buttonLevel = calculateLevel(guild.lastPressTime, now);        
+        const displayName = `${interaction.member.nickname ?? interaction.user.nickname ?? interaction.user.username} [${user.level}]`;
         
-        const currentLevel = guildDb.users[interaction.user.id] ?? 0;
-        const displayName = `${interaction.user.username} (${currentLevel})`;
-        
-        let msg = `${displayName} pressed the button! ` + getPressedMsg(guildDb.lastClick, now);
-        const logPrefix = `[` + format(now, 'yyyy-MM-dd HH:mm:ss') + ` @ ${interaction.guild.name}]`;
+        let msg = `${displayName} pressed the button! ` + getPressedMsg(guild);
     
-        if (newLevel === 0) {
+        if (buttonLevel === 0) {
             logger.logInteraction(interaction, 'pressed the inactive button.');
             
-        } else if (newLevel > currentLevel) {
-            msg += `\nThey are now level ${newLevel}.`;
-            const diff = newLevel-currentLevel;
+        } else if (buttonLevel > user.level) {
+            msg += `\nThey are now level ${buttonLevel}.`;
+            const diff = buttonLevel - user.level;
             if (diff >= 10) {
-                msg += ` What a leap! A round of applause for ${interaction.user.username}!`;
+                msg += ` What a leap! A round of applause for them!`;
             } else if (diff >= 5) {
                 msg += ` They showed some real patience here!`;
             } else if (diff == 1) {
                 msg += ` Babysteps!`;
             } 
-            
-            guildDb.users[interaction.user.id] = newLevel;
-            logger.logInteraction(interaction, `(level ${currentLevel}) pressed the button and reached level ${newLevel} (+${diff})`);
+
+            await pressButton(interaction.guild, interaction.member, now, buttonLevel, buttonLevel);
+            logger.logInteraction(interaction, `(level ${user.level}) pressed the button and reached level ${buttonLevel} (+${diff})`);
+
+            const topUserAfter = (await getTopUsers(interaction.guildId, 1))[0];      
+            if (topUserAfter.userId === interaction.user.id) {
+                if (topUserBefore && topUserBefore.level > 0 && topUserAfter.userId === topUserBefore.userId) {
+                    msg += `\nThey're strengthening their lead!`;
+                    logger.logInteraction(interaction, `is strengthening their lead!`);
+                } else {
+                    msg += `\nThey're in the lead now!`;
+                    logger.logInteraction(interaction, `is now in the lead!`);
+                }
+            }
+
         } else {
             msg += `\nPressing the button early to deny others is not a very enlightened move.`;
-            chance = 40 + (Math.max(0, 10 - currentLevel)*6);
+            chance = 40 + (Math.max(0, 10 - user.level)*6);
             if (Math.floor(Math.random() * 100) < chance) {
+                await pressButton(interaction.guild, interaction.member, now, buttonLevel, user.level);
+
                 msg += ` This time they escaped the punishment though.`;
-                logger.logInteraction(interaction, `(level ${currentLevel}) reset the button at level ${newLevel}. It went unpunished.`);
+                logger.logInteraction(interaction, `(level ${user.level}) reset the button at level ${buttonLevel}. It went unpunished.`);
                 
             } else {
-                punishedLevel = Math.max(0, currentLevel - 1);
-                msg += ` They have been punished and are now level ${punishedLevel}.`;
-                guildDb.users[interaction.user.id] = punishedLevel;
-                
-                logger.logInteraction(interaction, `(level ${currentLevel}) reset the button at level ${newLevel} and were punished for it.`);
-            }
-            
+                punishedLevel = Math.max(0, user.level - 1);
+                await pressButton(interaction.guild, interaction.member, now, buttonLevel, punishedLevel);
+
+                msg += ` They have been punished and are now level ${punishedLevel}.`;                
+                logger.logInteraction(interaction, `(level ${user.level}) reset the button at level ${buttonLevel} and were punished for it.`);
+            }            
         }    
-    
-        guildDb.clicks++;
-        guildDb.lastClick = now;
-        guildDb.lastClickById = interaction.user.id;
-        guildDb.lastClickByName = interaction.user.username;
-    
-        const highestClick = guildDb.highestClick ?? 0;
-        if (highestClick < newLevel) {
-            msg += `\nThey're in the lead now!`;
-            guildDb.highestClick = newLevel;
-            guildDb.highestClickById = interaction.user.id;
-            guildDb.highestClickByName = interaction.user.username;
-            logger.logInteraction(interaction, `is now in the lead!`);
-        }
-        
-        await saveGuildDb(interaction.guild.id, guildDb, db);
-        
+
+        updateStatus(interaction.guild);
         return interaction.reply(msg);
     },
 };
+
+function getPressedMsg(guild) {    
+    const buttonLevel = calculateLevel(guild.lastPressTime);
+    if (buttonLevel === 0) {
+        return `The button was not flashing. Nothing is happening.`;
+    }
+
+    if (!guild.lastPressTime) {
+        return `The button beeps and flashes once, then resets.`;
+    }
+        
+    return `The button beeps and flashes ${buttonLevel} times in a row, then resets.`;
+}

@@ -1,4 +1,7 @@
+require('dotenv').config();
 require("@replit/database");
+const button = require('./lib/thebutton/button');
+const { openDb } = require('./lib/thebutton/db');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -27,8 +30,20 @@ for (const folder of commandFolders) {
 	}
 }
 
-client.once(Events.ClientReady, () => {
-	console.log('Ready!');
+client.once(Events.ClientReady, async () => {
+	console.log('Logged in!');
+	
+	const guilds = await client.guilds.fetch();
+	console.log('TheButton currently resides in these guilds:');
+	guilds.each(async function (guild) {
+		console.log('- ' + guild.name + ' (' + guild.id + ')');
+		button.updateStatus(guild);
+	});	
+});
+
+client.once(Events.GuildCreate, async (guild) => {
+	console.log('Joined Guild: ' + guild.name + ' (' + guild.id + ')');
+	button.updateStatus(guild);
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -50,4 +65,7 @@ client.on(Events.InteractionCreate, async interaction => {
 	}
 });
 
-client.login(token);
+(async function() { 
+	await openDb(); 	
+	client.login(token);
+})();
